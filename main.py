@@ -90,7 +90,7 @@ Child Document:
 {child_text}
 """
         extraction_response = model.generate_content(extraction_prompt)
-        print("Gemini extraction raw response:", repr(extraction_response.text))
+        # print("Gemini extraction raw response:", repr(extraction_response.text))
         match = re.search(r'\{[\s\S]+\}', extraction_response.text)
         extraction_json = match.group(0) if match else extraction_response.text
         try:

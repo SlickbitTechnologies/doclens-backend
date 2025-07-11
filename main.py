@@ -119,11 +119,14 @@ USPI Sections:
             print("Failed to parse Gemini matching response as JSON:", e)
             matched_pairs = []
 
+        # Filter matched_pairs to only include real matches (both titles non-empty)
+        filtered_matched_pairs = [pair for pair in matched_pairs if pair.get('cds_title') and pair.get('child_title')]
+
         # Build unified list for all sections (matched and unmatched)
-        matched_cds_titles = set(pair['cds_title'] for pair in matched_pairs if pair.get('cds_title'))
-        matched_child_titles = set(pair['child_title'] for pair in matched_pairs if pair.get('child_title'))
-        matched_by_cds_title = {pair['cds_title']: pair for pair in matched_pairs if pair.get('cds_title')}
-        matched_by_child_title = {pair['child_title']: pair for pair in matched_pairs if pair.get('child_title')}
+        matched_cds_titles = set(pair['cds_title'] for pair in filtered_matched_pairs)
+        matched_child_titles = set(pair['child_title'] for pair in filtered_matched_pairs)
+        matched_by_cds_title = {pair['cds_title']: pair for pair in filtered_matched_pairs}
+        matched_by_child_title = {pair['child_title']: pair for pair in filtered_matched_pairs}
         unified_list = []
         # Add all CDS sections (matched or unmatched)
         for cds_sec in cds_sections:
@@ -158,11 +161,43 @@ USPI Sections:
                     'status': 'Unmatched'
                 })
 
+        # Build section_comparisons for overall/section-wise summary
+        section_comparisons = []
+        for pair in filtered_matched_pairs:
+            cds_content = pair.get('cds_content', '')
+            child_content = pair.get('child_content', '')
+            # Use difflib to count changes (number of differing lines)
+            cds_lines = cds_content.splitlines()
+            child_lines = child_content.splitlines()
+            diff = list(difflib.unified_diff(cds_lines, child_lines))
+            change_count = sum(1 for line in diff if line.startswith('+ ') or line.startswith('- '))
+            # Use Gemini to generate a summary of the difference
+            summary_prompt = f"""
+You are an expert in regulatory document analysis. Compare the following two sections and summarize the key differences in 1-2 sentences for a regulatory professional. Be concise and specific.
+CDS Section:
+{cds_content}
+USPI Section:
+{child_content}
+"""
+            summary = ""
+            try:
+                summary_response = model.generate_content(summary_prompt)
+                summary = summary_response.text.strip()
+            except Exception as e:
+                print("Failed to get Gemini summary for section:", e)
+                summary = "Summary not available."
+            section_comparisons.append({
+                'title': pair.get('cds_title') or pair.get('child_title'),
+                'change_count': change_count,
+                'summary': summary
+            })
+
         return {
-            "matched_pairs": matched_pairs,
+            "matched_pairs": filtered_matched_pairs,
             "cds_sections": cds_sections,
             "child_sections": child_sections,
-            "unified_list": unified_list
+            "unified_list": unified_list,
+            "section_comparisons": section_comparisons
         }
     except Exception as e:
         print(f"Error in /compare: {e}")

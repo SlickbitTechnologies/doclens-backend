@@ -1,260 +1,169 @@
 import os
-from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import PyPDF2
-from docx import Document
+from dotenv import load_dotenv
 import google.generativeai as genai
 import re
+import json
 import difflib
+
+def fuzzy_match(a, b):
+    if not a or not b:
+        return False
+    a, b = a.lower(), b.lower()
+    return a == b or a in b or b in a
+
+def normalize_title(title):
+    # Remove numbers, punctuation, and convert to uppercase
+    return re.sub(r'[^A-Z ]', '', title.upper()) if title else ''
+
+load_dotenv()
 
 app = FastAPI()
 
-# CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # React dev server
+    allow_origins=["http://localhost:5173", "http://localhost:5174"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-load_dotenv()
-
-def extract_text_from_pdf(file_obj):
-    reader = PyPDF2.PdfReader(file_obj)
-    text = ""
-    for page in reader.pages:
-        text += page.extract_text() or ""
-    return text
-
-def extract_text_from_docx(file_obj):
-    doc = Document(file_obj)
-    text = ""
-    for para in doc.paragraphs:
-        text += para.text + "\n"
-    return text
-
-def compare_with_gemini(cds_text, child_text, api_key):
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
-    prompt = f"""
-You are an expert engine trained on global pharma document formats (CDS, USPI, SmPC, SwissPI, JPI, AUSPI, IPL). Your task: analyze a source (CDS) and a child (e.g., USPI) document, and report section-level differences.
-
-TASK:
-For each aligned section:
-Analyze both sections fully.
-Identify differences as:
-Added (child-only)
-Omitted (CDS-only)
-Modified (content differs)
-Summarize differences in bullet points.
-Extract verbatim the differing text.
-
-OUTPUT FORMAT:
-Section: [Section Title]
-Summary of Differences:
-[Bullet point summary of each difference]
-CDS-only (green):
-"[Exact CDS text missing from child]"
-Child-only (red):
-"[Exact child text not in CDS]"
-Modified (pink):
-"[CDS text]" / "[Child text]"
-
-If no differences, output:
-Section: [Section Title]
-No differences found.
-
-CONSTRAINTS:
-Ignore identical content and formatting differences.
-Do not paraphrase or comment; quote differences verbatim.
-No regulatory strategy or intent analysis.
-
-CDS Section:
-{cds_text}
-
-Child Section:
-{child_text}
-"""
-    response = model.generate_content(prompt)
-    return response.text
-
-def split_into_sections(text):
-    # This regex matches headings like '1. ', '2.1 ', etc.
-    pattern = r'(\d+(?:\.\d+)*\.\s+[^\n]+)'
-    matches = list(re.finditer(pattern, text))
-    sections = []
-    for i, match in enumerate(matches):
-        start = match.start()
-        end = matches[i+1].start() if i+1 < len(matches) else len(text)
-        title = match.group().strip()
-        content = text[start+len(title):end].strip()
-        sections.append({'title': title, 'content': content})
-    return sections
-
-def highlight_differences(cds_text, child_text):
-    differ = difflib.Differ()
-    diff = list(differ.compare(cds_text.split(), child_text.split()))
-    cds_highlighted = []
-    child_highlighted = []
-    for word in diff:
-        if word.startswith('- '):
-            cds_highlighted.append(f'<span class="text-green-600">{word[2:]}</span>')
-        elif word.startswith('+ '):
-            child_highlighted.append(f'<span class="text-red-600">{word[2:]}</span>')
-        elif word.startswith('  '):
-            cds_highlighted.append(word[2:])
-            child_highlighted.append(word[2:])
-    return ' '.join(cds_highlighted), ' '.join(child_highlighted)
-
-def compare_section_content(cds_content, child_content):
-    matcher = difflib.SequenceMatcher(None, cds_content, child_content)
-    cds_only = []
-    child_only = []
-    modified = []
-    summary = []
-
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == 'replace':
-            cds_text = cds_content[i1:i2].strip()
-            child_text = child_content[j1:j2].strip()
-            if cds_text and child_text:
-                modified.append({"cds": cds_text, "child": child_text})
-                summary.append(f'Modified: "{cds_text}" → "{child_text}"')
-        elif tag == 'delete':
-            cds_text = cds_content[i1:i2].strip()
-            if cds_text:
-                cds_only.append(cds_text)
-                summary.append(f'Omitted in child: "{cds_text}"')
-        elif tag == 'insert':
-            child_text = child_content[j1:j2].strip()
-            if child_text:
-                child_only.append(child_text)
-                summary.append(f'Added in child: "{child_text}"')
-
-    no_difference = not (cds_only or child_only or modified)
-    return {
-        "summary": summary,
-        "cds_only": cds_only,
-        "child_only": child_only,
-        "modified": modified,
-        "no_difference": no_difference
-    }
-
-def strict_sectionwise_comparison(cds_sections, child_sections):
-    cds_dict = {s['title']: s['content'] for s in cds_sections}
-    child_dict = {s['title']: s['content'] for s in child_sections}
-    all_titles = sorted(set(cds_dict.keys()) | set(child_dict.keys()))
-    results = []
-    for title in all_titles:
-        cds_content = cds_dict.get(title, '')
-        child_content = child_dict.get(title, '')
-        section_result = compare_section_content(cds_content, child_content)
-        results.append({
-            "section": title,
-            **section_result
-        })
-    return results
-
-def find_best_match(section, candidates):
-    best_score = 0
-    best_match = None
-    for cand in candidates:
-        score = difflib.SequenceMatcher(None, section['content'], cand['content']).ratio()
-        if score > best_score:
-            best_score = score
-            best_match = cand
-    return best_match, best_score
-
-def summarize_section_with_gemini(cds_text, child_text, api_key):
-    import google.generativeai as genai
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
-    prompt = f"""
-Summarize the following two sections and their differences in 100 words or less:
-CDS Section:
-{cds_text}
-
-Child Section:
-{child_text}
-"""
-    response = model.generate_content(prompt)
-    return response.text.strip()
-
-def match_and_summarize_sections(cds_sections, child_sections, api_key):
-    results = []
-    used_child_indices = set()
-    for cds_sec in cds_sections:
-        best_match, score = find_best_match(cds_sec, child_sections)
-        if best_match and score > 0.5:
-            summary = summarize_section_with_gemini(cds_sec['content'], best_match['content'], api_key)
-            results.append({
-                'cds_title': cds_sec['title'],
-                'child_title': best_match['title'],
-                'cds_content': cds_sec['content'],
-                'child_content': best_match['content'],
-                'summary': summary
-            })
-            used_child_indices.add(child_sections.index(best_match))
-        else:
-            summary = summarize_section_with_gemini(cds_sec['content'], '', api_key)
-            results.append({
-                'cds_title': cds_sec['title'],
-                'child_title': None,
-                'cds_content': cds_sec['content'],
-                'child_content': '',
-                'summary': summary
-            })
-    # Add unmatched child sections
-    for idx, child_sec in enumerate(child_sections):
-        if idx not in used_child_indices:
-            summary = summarize_section_with_gemini('', child_sec['content'], api_key)
-            results.append({
-                'cds_title': None,
-                'child_title': child_sec['title'],
-                'cds_content': '',
-                'child_content': child_sec['content'],
-                'summary': summary
-            })
-    return results
-
 @app.post("/compare")
 async def compare(source: UploadFile = File(...), child: UploadFile = File(...)):
     try:
-        # Extract text from uploaded files
+        # Read file contents
+        source.file.seek(0)
+        cds_text = source.file.read().decode(errors='ignore') if source.filename.endswith('.txt') else source.file.read().decode(errors='ignore')
+        child.file.seek(0)
+        child_text = child.file.read().decode(errors='ignore') if child.filename.endswith('.txt') else child.file.read().decode(errors='ignore')
+
+        # If PDF or DOCX, use PyPDF2 or python-docx to extract text
         if source.filename.endswith('.pdf'):
+            import PyPDF2
             source.file.seek(0)
-            cds_text = extract_text_from_pdf(source.file)
+            reader = PyPDF2.PdfReader(source.file)
+            cds_text = "".join([page.extract_text() or "" for page in reader.pages])
         elif source.filename.endswith('.docx'):
+            from docx import Document
             source.file.seek(0)
-            cds_text = extract_text_from_docx(source.file)
-        else:
-            raise ValueError("Unsupported source file type. Only PDF and DOCX are supported.")
+            doc = Document(source.file)
+            cds_text = "\n".join([para.text for para in doc.paragraphs])
 
         if child.filename.endswith('.pdf'):
+            import PyPDF2
             child.file.seek(0)
-            child_text = extract_text_from_pdf(child.file)
+            reader = PyPDF2.PdfReader(child.file)
+            child_text = "".join([page.extract_text() or "" for page in reader.pages])
         elif child.filename.endswith('.docx'):
+            from docx import Document
             child.file.seek(0)
-            child_text = extract_text_from_docx(child.file)
-        else:
-            raise ValueError("Unsupported child file type. Only PDF and DOCX are supported.")
+            doc = Document(child.file)
+            child_text = "\n".join([para.text for para in doc.paragraphs])
 
-        # Split into sections
-        cds_sections = split_into_sections(cds_text)
-        child_sections = split_into_sections(child_text)
-
-        # Load Gemini API key
+        # Gemini API key
         gemini_api_key = os.environ.get("GEMINI_API_KEY")
-        print('GEMINI_API_KEY:', os.environ.get('GEMINI_API_KEY'))
         if not gemini_api_key:
-            raise ValueError("Gemini API key is not set. Please configure your GEMINI_API_KEY in the .env file.")
+            raise HTTPException(status_code=500, detail="Gemini API key is not set.")
+        genai.configure(api_key=gemini_api_key)
+        model = genai.GenerativeModel('gemini-2.0-flash')
 
-        # Match and summarize
-        sectionwise_results = match_and_summarize_sections(cds_sections, child_sections, gemini_api_key)
+        # 1. Gemini call: extract sections from both files
+        extraction_prompt = f"""
+You are an expert in document analysis. Here are two documents: a Core Data Sheet (CDS) and a Child (USPI) document.
+For each document:
+1. Split the text into logical sections based on headings or numbering.
+2. For each section, return the section title and the section content.
+3. Output the result as a JSON object with two keys: \"cds_sections\" and \"child_sections\".
+   - \"cds_sections\" should be a list of objects with \"title\" and \"content\" for each CDS section.
+   - \"child_sections\" should be a list of objects with \"title\" and \"content\" for each Child section.
+Respond ONLY with a valid JSON object, no explanation, no markdown, no extra text, no code block markers.
 
-        return {"sections": sectionwise_results}
+CDS Document:
+{cds_text}
+
+Child Document:
+{child_text}
+"""
+        extraction_response = model.generate_content(extraction_prompt)
+        print("Gemini extraction raw response:", repr(extraction_response.text))
+        match = re.search(r'\{[\s\S]+\}', extraction_response.text)
+        extraction_json = match.group(0) if match else extraction_response.text
+        try:
+            data = json.loads(extraction_json)
+            cds_sections = data.get("cds_sections", [])
+            child_sections = data.get("child_sections", [])
+        except Exception as e:
+            print("Failed to parse Gemini extraction response as JSON:", e)
+            cds_sections = []
+            child_sections = []
+
+        # Use Gemini for content similarity matching in one call
+        matching_prompt = f"""
+You are an expert in regulatory document analysis.
+Given these two lists of sections, match each section from the USPI list to the most similar section from the CDS list, based on meaning and context (not just wording).
+Return a JSON array of objects: {{cds_title, cds_content, child_title, child_content, similarity_score (0-1)}}.
+If no good match exists (similarity_score < 0.3), set cds_title and cds_content to empty strings.
+CDS Sections:
+{json.dumps(cds_sections, ensure_ascii=False)}
+USPI Sections:
+{json.dumps(child_sections, ensure_ascii=False)}
+"""
+        matching_response = model.generate_content(matching_prompt)
+        print("Gemini matching raw response:", repr(matching_response.text))
+        match = re.search(r'\[.*\]', matching_response.text, re.DOTALL)
+        matching_json = match.group(0) if match else matching_response.text
+        try:
+            matched_pairs = json.loads(matching_json)
+        except Exception as e:
+            print("Failed to parse Gemini matching response as JSON:", e)
+            matched_pairs = []
+
+        # Build unified list for all sections (matched and unmatched)
+        matched_cds_titles = set(pair['cds_title'] for pair in matched_pairs if pair.get('cds_title'))
+        matched_child_titles = set(pair['child_title'] for pair in matched_pairs if pair.get('child_title'))
+        matched_by_cds_title = {pair['cds_title']: pair for pair in matched_pairs if pair.get('cds_title')}
+        matched_by_child_title = {pair['child_title']: pair for pair in matched_pairs if pair.get('child_title')}
+        unified_list = []
+        # Add all CDS sections (matched or unmatched)
+        for cds_sec in cds_sections:
+            if cds_sec.get('title', '') in matched_by_cds_title:
+                pair = matched_by_cds_title[cds_sec.get('title', '')]
+                unified_list.append({
+                    'cds_title': pair['cds_title'],
+                    'cds_content': pair['cds_content'],
+                    'child_title': pair['child_title'],
+                    'child_content': pair['child_content'],
+                    'similarity': pair.get('similarity_score'),
+                    'status': 'Matched'
+                })
+            else:
+                unified_list.append({
+                    'cds_title': cds_sec.get('title', ''),
+                    'cds_content': cds_sec.get('content', ''),
+                    'child_title': '',
+                    'child_content': '',
+                    'similarity': None,
+                    'status': 'Unmatched'
+                })
+        # Add unmatched USPI sections
+        for child_sec in child_sections:
+            if child_sec.get('title', '') not in matched_by_child_title:
+                unified_list.append({
+                    'cds_title': '',
+                    'cds_content': '',
+                    'child_title': child_sec.get('title', ''),
+                    'child_content': child_sec.get('content', ''),
+                    'similarity': None,
+                    'status': 'Unmatched'
+                })
+
+        return {
+            "matched_pairs": matched_pairs,
+            "cds_sections": cds_sections,
+            "child_sections": child_sections,
+            "unified_list": unified_list
+        }
     except Exception as e:
         print(f"Error in /compare: {e}")
-        raise HTTPException(status_code=500, detail="Failed to upload. Please try again later.")
+        raise HTTPException(status_code=500, detail= "Failed to upload. Please try again later")

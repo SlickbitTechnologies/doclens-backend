@@ -167,6 +167,14 @@ USPI Sections:
 
         # Build section_comparisons for overall/section-wise summary
         section_comparisons = []
+        html_diff = difflib.HtmlDiff()
+        def get_content_differences(cds_content, child_content):
+            # Split into sentences (or use lines, or bullet points)
+            cds_sentences = set([s.strip() for s in cds_content.replace('\n', '. ').split('.') if s.strip()])
+            child_sentences = set([s.strip() for s in child_content.replace('\n', '. ').split('.') if s.strip()])
+            missing_in_child = cds_sentences - child_sentences
+            missing_in_cds = child_sentences - cds_sentences
+            return list(missing_in_child), list(missing_in_cds)
         for pair in filtered_matched_pairs:
             cds_content = pair.get('cds_content', '')
             child_content = pair.get('child_content', '')
@@ -175,6 +183,12 @@ USPI Sections:
             child_lines = child_content.splitlines()
             diff = list(difflib.unified_diff(cds_lines, child_lines))
             change_count = sum(1 for line in diff if line.startswith('+ ') or line.startswith('- '))
+            # Generate HTML diff for the section
+            diff_html = html_diff.make_table(cds_lines, child_lines, fromdesc='CDS', todesc='Child', context=True, numlines=1)
+            # Find missing content
+            missing_in_child, missing_in_cds = get_content_differences(cds_content, child_content)
+            # Add missing content to change_count
+            total_change_count = change_count + len(missing_in_child) + len(missing_in_cds)
             # Use Gemini to generate a summary of the difference
             summary_prompt = f"""
 You are an expert in regulatory document analysis. Compare the following two sections and summarize the key differences in 1-2 sentences for a regulatory professional. Be concise and specific.
@@ -192,8 +206,11 @@ USPI Section:
                 summary = "Summary not available."
             section_comparisons.append({
                 'title': pair.get('cds_title') or pair.get('child_title'),
-                'change_count': change_count,
-                'summary': summary
+                'change_count': total_change_count,
+                'summary': summary,
+                'diff': diff_html,
+                'missing_in_child': missing_in_child,
+                'missing_in_cds': missing_in_cds
             })
 
         return {

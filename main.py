@@ -114,7 +114,7 @@ USPI Sections:
 {json.dumps(child_sections, ensure_ascii=False)}
 """
         matching_response = model.generate_content(matching_prompt)
-        print("Gemini matching raw response:", repr(matching_response.text))
+        # print("Gemini matching raw response:", repr(matching_response.text))
         match = re.search(r'\[.*\]', matching_response.text, re.DOTALL)
         matching_json = match.group(0) if match else matching_response.text
         try:

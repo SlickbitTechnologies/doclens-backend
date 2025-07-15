@@ -69,7 +69,7 @@ async def compare(source: UploadFile = File(...), child: UploadFile = File(...))
         if not gemini_api_key:
             raise HTTPException(status_code=500, detail="Gemini API key is not set.")
         genai.configure(api_key=gemini_api_key)
-        model = genai.GenerativeModel('Gemini 2.5 Flash')
+        model = genai.GenerativeModel('gemini-1.5-flash')
 
         # Single Gemini call for extraction, matching, and summarization
         comparison_prompt = f"""
@@ -103,28 +103,7 @@ Child Document:
         try:
             matched_pairs = json.loads(comparison_json)
         except Exception as e:
-            cds_sections = []
-            child_sections = []
-
-        # Use Gemini for content similarity matching in one call
-        matching_prompt = f"""
-You are an expert in regulatory document analysis.
-Given these two lists of sections, match each section from the USPI list to the most similar section from the CDS list, based on meaning and context (not just wording).
-Return a JSON array of objects: {{cds_title, cds_content, child_title, child_content, similarity_score (0-1)}}.
-If no good match exists (similarity_score < 0.3), set cds_title and cds_content to empty strings.
-CDS Sections:
-{json.dumps(cds_sections, ensure_ascii=False)}
-USPI Sections:
-{json.dumps(child_sections, ensure_ascii=False)}
-"""
-        matching_response = model.generate_content(matching_prompt)
-        # print("Gemini matching raw response:", repr(matching_response.text))
-        match = re.search(r'\[.*\]', matching_response.text, re.DOTALL)
-        matching_json = match.group(0) if match else matching_response.text
-        try:
-            matched_pairs = json.loads(matching_json)
-        except Exception as e:
-            print("Failed to parse Gemini matching response as JSON:", e)
+            print("Failed to parse Gemini comparison response as JSON:", e)
             matched_pairs = []
 
         # Build section lists for UI compatibility
@@ -168,5 +147,5 @@ USPI Sections:
             "section_comparisons": section_comparisons
         }
     except Exception as e:
-        # print(f"Error in /compare: {e}")
+        print(f"Error in /compare: {e}")
         raise HTTPException(status_code=500, detail= "Failed to upload. Please try again later")

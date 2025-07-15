@@ -69,7 +69,7 @@ async def compare(source: UploadFile = File(...), child: UploadFile = File(...))
         if not gemini_api_key:
             raise HTTPException(status_code=500, detail="Gemini API key is not set.")
         genai.configure(api_key=gemini_api_key)
-        model = genai.GenerativeModel('Gemini 2.5 Pro Experimental')
+        model = genai.GenerativeModel('Gemini 2.5 Flash')
 
         # Single Gemini call for extraction, matching, and summarization
         comparison_prompt = f"""
